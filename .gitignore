@@ -1,0 +1,8 @@
+.env
+.venv/
+venv/
+__pycache__/
+*.pyc
+# O histórico de preços (data/precos.db) é versionado de propósito,
+# para a execução na nuvem (GitHub Actions) lembrar o que já avisou.
+data/relatorio.html
