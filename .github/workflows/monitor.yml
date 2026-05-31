@@ -21,6 +21,10 @@ concurrency:
   group: monitor-passagens
   cancel-in-progress: false
 
+# Usa a versão nova do Node (silencia o aviso de "deprecation"; não muda o app).
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
+
 jobs:
   monitorar:
     runs-on: ubuntu-latest
