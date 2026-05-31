@@ -5,7 +5,12 @@ name: Monitor de Passagens
 on:
   schedule:
     - cron: "0 */6 * * *"   # a cada 6 horas (horário UTC)
-  workflow_dispatch: {}      # botão "Run workflow" para rodar quando quiser
+  workflow_dispatch:         # botão "Run workflow" para rodar quando quiser
+    inputs:
+      teste:
+        description: "Enviar uma mensagem de TESTE no meu Telegram agora?"
+        type: boolean
+        default: false
 
 # Necessário para salvar o histórico de preços de volta no repositório.
 permissions:
@@ -56,6 +61,15 @@ jobs:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
         run: python main.py run
+
+      - name: Enviar mensagem de teste no Telegram (opcional)
+        if: ${{ github.event.inputs.teste == 'true' }}
+        env:
+          ORIGIN: FOR
+          DESTINATION: CNF
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+        run: python main.py test-telegram
 
       - name: Salvar o histórico de preços
         run: |

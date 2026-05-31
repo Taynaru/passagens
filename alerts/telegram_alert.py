@@ -71,13 +71,19 @@ def send_deal_telegram(settings: Settings, deals: list[Offer]) -> bool:
 
 
 def send_test_telegram(settings: Settings) -> bool:
-    fake = Offer(
-        provider="teste", fare_type="cash",
-        origin=settings.origin, destination=settings.destination,
-        depart_date="2026-07-01", return_date="2026-07-08",
-        price=599.90, airline="G3",
-    )
-    return send_deal_telegram(settings, [fake])
+    """Manda uma mensagem de teste CLARA (não é promoção) para validar o canal."""
+    if not (settings.telegram_bot_token and settings.telegram_chat_id):
+        log.warning("Telegram não configurado. Rode 'python main.py telegram-setup'.")
+        return False
+    text = ("✅ <b>Teste do Monitor de Passagens</b>\n\n"
+            f"Estou funcionando e de olho na rota "
+            f"<b>{settings.origin} ⇄ {settings.destination}</b> (ida e volta).\n"
+            "Vou te avisar aqui assim que o preço ficar baixo. 📲\n\n"
+            "<i>Esta é só uma mensagem de teste — não é uma promoção.</i>")
+    ok = _send(settings.telegram_bot_token, settings.telegram_chat_id, text)
+    if ok:
+        log.info("Mensagem de teste enviada no Telegram.")
+    return ok
 
 
 def fetch_chat_id(token: str) -> str | None:
