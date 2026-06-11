@@ -75,9 +75,14 @@ def send_test_telegram(settings: Settings) -> bool:
     if not (settings.telegram_bot_token and settings.telegram_chat_id):
         log.warning("Telegram não configurado. Rode 'python main.py telegram-setup'.")
         return False
+    nights = ", ".join(str(n) for n in settings.trip_nights)
     text = ("✅ <b>Teste do Monitor de Passagens</b>\n\n"
             f"Estou funcionando e de olho na rota "
-            f"<b>{settings.origin} ⇄ {settings.destination}</b> (ida e volta).\n"
+            f"<b>{settings.origin} ⇄ {settings.destination}</b> (ida e volta).\n\n"
+            f"🔍 <b>Configuração atual:</b>\n"
+            f"💵 Alerta de preço: até <b>R$ {settings.cash_threshold:.0f}</b>\n"
+            f"📅 Período buscado: de <b>{settings.start_days}</b> a <b>{settings.end_days}</b> dias a partir de hoje\n"
+            f"🌙 Durações testadas: <b>{nights}</b> noites\n\n"
             "Vou te avisar aqui assim que o preço ficar baixo. 📲\n\n"
             "<i>Esta é só uma mensagem de teste — não é uma promoção.</i>")
     ok = _send(settings.telegram_bot_token, settings.telegram_chat_id, text)
