@@ -1,78 +1,135 @@
-name: Monitor de Passagens
-# Roda automaticamente a cada 6 horas (na nuvem do GitHub, de graça),
-# mesmo com o seu computador desligado. Também dá pra rodar na mão pelo botão.
-on:
-  schedule:
-    - cron: "0 */6 * * *"   # a cada 6 horas (horário UTC)
-  workflow_dispatch:         # botão "Run workflow" para rodar quando quiser
-    inputs:
-      teste:
-        description: "Enviar uma mensagem de TESTE no meu Telegram agora?"
-        type: boolean
-        default: false
-# Necessário para salvar o histórico de preços de volta no repositório.
-permissions:
-  contents: write
-# Evita que duas execuções rodem ao mesmo tempo (e conflitem no histórico).
-concurrency:
-  group: monitor-passagens
-  cancel-in-progress: false
-# Usa a versão nova do Node (silencia o aviso de "deprecation"; não muda o app).
-env:
-  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
-jobs:
-  monitorar:
-    runs-on: ubuntu-latest
-    steps:
-      - name: Baixar o código
-        uses: actions/checkout@v5
-      - name: Preparar o Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: "3.12"
-      - name: Instalar dependências
-        run: pip install -r requirements.txt
-      - name: Rodar o monitor
-        env:
-          # --- Rota e janela de busca (não são segredos) ---
-          ORIGIN: FOR
-          DESTINATION: CNF
-          ADULTS: "1"
-          CURRENCY: BRL
-          START_DAYS: "21"
-          END_DAYS: "120"
-          STEP_DAYS: "7"
-          TRIP_NIGHTS: "4,7,10"
-          # --- Provedores ---
-          USE_SAMPLE_DATA: "false"
-          CASH_PROVIDER: travelpayouts
-          ENABLE_CASH: "true"
-          ENABLE_MILES: "false"
-          # --- Limiares de alerta ---
-          CASH_THRESHOLD: "1100"
-          ALERT_ON_NEW_LOW: "true"
-          NEW_LOW_DAYS: "30"
-          # --- Segredos (configurados em Settings -> Secrets do GitHub) ---
-          TRAVELPAYOUTS_TOKEN: ${{ secrets.TRAVELPAYOUTS_TOKEN }}
-          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
-          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
-        run: python main.py run
-      - name: Enviar mensagem de teste no Telegram (opcional)
-        if: ${{ github.event.inputs.teste == 'true' }}
-        env:
-          ORIGIN: FOR
-          DESTINATION: CNF
-          CASH_THRESHOLD: "1100"
-          START_DAYS: "21"
-          END_DAYS: "120"
-          TRIP_NIGHTS: "4,7,10"
-          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
-          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
-        run: python main.py test-telegram
-      - name: Salvar o histórico de preços
-        run: |
-          git config user.name "github-actions[bot]"
-          git config user.email "github-actions[bot]@users.noreply.github.com"
-          git add -f data/precos.db
-          git commit -m "Atualiza histórico de preços [skip ci]" || echo "Sem mudanças para salvar."
-          git push || echo "Nada para enviar."
+"""Orquestração: busca os preços, salva no banco, decide o que é 'oferta boa'
+e dispara o alerta por e-mail."""
+from __future__ import annotations
+
+import logging
+
+from alerts.email_alert import send_deal_email
+from alerts.telegram_alert import send_deal_telegram
+from config import Settings
+from db import Database
+from models import Offer
+from providers import build_providers
+
+log = logging.getLogger(__name__)
+
+# Uma "nova mínima" só vira alerta se for pelo menos isto mais barata que a
+# última oferta já alertada para as mesmas datas (evita spam por centavos).
+MIN_IMPROVEMENT = 0.03  # 3%
+
+
+def _dispatch_alerts(settings: Settings, deals: list[Offer]) -> bool:
+    """Envia o alerta por todos os canais configurados (Telegram e/ou e-mail).
+
+    Retorna True se pelo menos um canal conseguiu enviar.
+    """
+    sent = False
+    if settings.telegram_bot_token and settings.telegram_chat_id:
+        sent = send_deal_telegram(settings, deals) or sent
+    if settings.smtp_user and settings.smtp_pass and settings.email_to:
+        sent = send_deal_email(settings, deals) or sent
+    has_channel = ((settings.telegram_bot_token and settings.telegram_chat_id)
+                   or (settings.smtp_user and settings.email_to))
+    if not has_channel:
+        log.warning("Nenhum canal de alerta configurado. Configure o Telegram "
+                    "('python main.py telegram-setup') ou o e-mail no .env.")
+    return sent
+
+
+def _is_better(offer: Offer, reference: float | int | None) -> bool:
+    """True se 'offer' é uma nova mínima (mais barata que a referência histórica).
+
+    Sem referência (primeira coleta, banco vazio) NÃO é considerado nova mínima —
+    senão a primeira execução dispararia alerta para tudo. Nesse caso só vale o
+    limiar configurado.
+    """
+    if reference is None:
+        return False
+    value = offer.miles if offer.fare_type == "miles" else offer.price
+    if value is None:
+        return False
+    return value < reference
+
+
+def evaluate_deals(settings: Settings, db: Database, offers: list[Offer],
+                   prev_min_cash: float | None,
+                   prev_min_miles: int | None) -> list[Offer]:
+    """Decide quais ofertas merecem alerta.
+
+    Critérios:
+      1. Abaixo do limiar configurado (CASH_THRESHOLD / MILES_THRESHOLD), OU
+      2. Nova mínima dos últimos NEW_LOW_DAYS dias (se ALERT_ON_NEW_LOW).
+    Depois aplica anti-spam (cooldown + melhora mínima).
+    """
+    candidates: list[Offer] = []
+    for o in offers:
+        if o.fare_type == "miles":
+            if o.miles is None:
+                continue
+            below = o.miles <= settings.miles_threshold
+            new_low = settings.alert_on_new_low and _is_better(o, prev_min_miles)
+        else:
+            below = o.price <= settings.cash_threshold
+            new_low = settings.alert_on_new_low and _is_better(o, prev_min_cash)
+        if below or new_low:
+            candidates.append(o)
+
+    # anti-spam: só avisa essas datas de novo se o preço ficar pelo menos
+    # MIN_IMPROVEMENT mais barato que o último alerta já enviado para elas.
+    # (Evita repetir o mesmo preço a cada ciclo quando ele roda sozinho 24h.)
+    deals: list[Offer] = []
+    for o in candidates:
+        prev_alert = db.min_alerted(o.fare_type, o.depart_date, o.return_date,
+                                    settings.new_low_days)
+        cur_val = o.miles if o.fare_type == "miles" else o.price
+        if (prev_alert is not None and cur_val is not None
+                and cur_val >= prev_alert * (1 - MIN_IMPROVEMENT)):
+            continue  # já avisei essas datas por um preço igual ou melhor
+        deals.append(o)
+
+    # melhores primeiro
+    deals.sort(key=lambda x: (x.miles or 0) if x.fare_type == "miles" else x.price)
+    return deals
+
+
+def run_cycle(settings: Settings, db: Database, force_sample: bool = False,
+              send_alerts: bool = True) -> tuple[list[Offer], list[Offer]]:
+    """Executa um ciclo completo de monitoramento."""
+    providers = build_providers(settings, force_sample=force_sample)
+    if not providers:
+        log.warning("Nenhum provedor ativo. Configure as chaves no .env "
+                    "ou rode com --sample.")
+        return [], []
+
+    # mínimos históricos ANTES de salvar o ciclo atual (referência p/ 'nova mínima')
+    prev_min_cash = db.min_cash(settings.new_low_days)
+    prev_min_miles = db.min_miles(settings.new_low_days)
+
+    all_offers: list[Offer] = []
+    for p in providers:
+        log.info("== Provedor: %s (%s) ==", p.name, p.fare_type)
+        try:
+            all_offers.extend(p.search())
+        except Exception as e:  # noqa: BLE001
+            log.error("Provedor %s falhou: %s", p.name, e)
+
+    if not all_offers:
+        log.info("Nenhuma oferta coletada neste ciclo.")
+        return [], []
+
+    db.save_offers(all_offers)
+    log.info("Salvas %d ofertas no banco.", len(all_offers))
+
+    deals = evaluate_deals(settings, db, all_offers, prev_min_cash, prev_min_miles)
+    if deals:
+        log.info("%d oferta(s) dispararam alerta:", len(deals))
+        for d in deals:
+            log.info("  ⭐ %s", d.human())
+        if send_alerts:
+            if _dispatch_alerts(settings, deals):
+                for d in deals:
+                    db.mark_alerted(d)
+    else:
+        log.info("Nenhuma oferta atingiu os limiares de alerta neste ciclo.")
+
+    return all_offers, deals
