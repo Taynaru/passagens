@@ -40,7 +40,7 @@ jobs:
           ADULTS: "1"
           CURRENCY: BRL
           START_DAYS: "21"
-          END_DAYS: "120"
+          END_DAYS: "365"
           STEP_DAYS: "7"
           TRIP_NIGHTS: "4,7,10"
           # --- Provedores ---
